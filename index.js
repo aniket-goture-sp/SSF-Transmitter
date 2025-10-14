@@ -74,17 +74,26 @@ async function initKeys() {
 
 /* ---------- Helpers ---------- */
 
-/** Sign a payload as an application/secevent+jwt SET */
+/** 
+ * Sign a payload as an RFC-compliant SET (Security Event Token)
+ * - Adds 'kid' to protected header
+ * - Uses typ: 'secevent+jwt' (per final CAEP spec)
+ */
 async function signSET(payload) {
   const now = Math.floor(Date.now() / 1000);
   return new SignJWT(payload)
-    .setProtectedHeader({ alg: "RS256", typ: "application/secevent+jwt" })
+    .setProtectedHeader({
+      alg: "RS256",
+      typ: "secevent+jwt",
+      kid: publicJwk.kid // ✅ include key ID
+    })
     .setIssuedAt(now)
     .setIssuer(ISS)
     .setAudience(payload.aud || DEFAULT_AUD)
     .setJti(uuidv4())
     .sign(signingKey);
 }
+
 
 /** Verify incoming SET (signed JWT) using jwks_uri found in payload */
 async function verifyIncomingSET(token) {
