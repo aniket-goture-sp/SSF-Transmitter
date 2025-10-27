@@ -42,7 +42,7 @@ app.use(bodyParser.json({ limit: "1mb" }));
 /* ---------- Configuration ---------- */
 const PORT = process.env.PORT || 3000;
 const ISS = (process.env.ISS || "https://ssfrisklevelrepo.onrender.com").replace(/\/$/, "");
-const DEFAULT_AUD = process.env.AUD || "https://receiver.example.com/";
+const DEFAULT_AUD = process.env.AUD || "https://ssfrisklevelrepo.onrender.com/";
 
 /* ---------- Load private key from file (PKCS#8) ---------- */
 const KEY_PATH = path.join(__dirname, "private_key_pkcs8.pem");
