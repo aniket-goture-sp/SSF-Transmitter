@@ -24,8 +24,8 @@ app.use(bodyParser.json({ limit: "1mb" }));
 
 /* --------------------------- CONFIG --------------------------- */
 const PORT = process.env.PORT || 3000;
-const ISS = (process.env.ISS || "https://ssfrisklevel.onrender.com").replace(/\/$/, "");
-const DEFAULT_AUD = process.env.AUD || "https://ssfrisklevel.onrender.com";
+const ISS = (process.env.ISS || "https://ssfrisklevelrepo.onrender.com").replace(/\/$/, "");
+const DEFAULT_AUD = process.env.AUD || "https://ssfrisklevelrepo.onrender.com";
 
 /* Default iss for iss_sub SubjectFormat (e.g. https://caep.dev/event) */
 const DEFAULT_ISS_SUB_ISS = process.env.ISS_SUB_ISS || "https://caep.dev/event";
@@ -169,7 +169,7 @@ app.get("/.well-known/ssf-configuration", (req, res) => {
 /* ------------------- AUTH MIDDLEWARE ------------------- */
 /*
   Expect Authorization: Bearer <token>
-  Token value is validated against process.env.SSF_AUTH_TOKEN || "token12345"
+  Token value is validated against process.env.SSF_AUTH_TOKEN || "token123"
 */
 app.use("/ssf", (req, res, next) => {
   const auth = req.headers.authorization || "";
@@ -177,7 +177,7 @@ app.use("/ssf", (req, res, next) => {
     return res.status(401).json({ error: "unauthorized", message: "missing_bearer_token" });
   }
   const token = auth.slice(7).trim();
-  const expected = process.env.SSF_AUTH_TOKEN || "token12345";
+  const expected = process.env.SSF_AUTH_TOKEN || "token123";
   if (!token || token !== expected) {
     return res.status(401).json({ error: "unauthorized", message: "invalid_token" });
   }
@@ -226,7 +226,7 @@ app.post("/ssf/streams", (req, res) => {
       delivery: {
         method,
         endpoint_url: endpoint,
-        authorization_header: delivery.authorization_header || "Bearer token12345",
+        authorization_header: delivery.authorization_header || "Bearer token123",
       },
       events_requested: body.events_requested,
       events_accepted: body.events_requested,
@@ -444,7 +444,7 @@ app.put("/ssf/streams", (req, res) => {
         delivery: {
           method,
           endpoint_url: endpoint,
-          authorization_header: delivery.authorization_header || "Bearer token12345"
+          authorization_header: delivery.authorization_header || "Bearer token123"
         },
         events_requested: incoming.events_requested || incoming.events_accepted || incoming.events_delivered || [],
         events_accepted: incoming.events_accepted || incoming.events_requested || incoming.events_delivered || [],
