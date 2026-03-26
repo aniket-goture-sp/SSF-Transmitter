@@ -24,8 +24,8 @@ app.use(bodyParser.json({ limit: "1mb" }));
 
 /* --------------------------- CONFIG --------------------------- */
 const PORT = process.env.PORT || 3000;
-const ISS = (process.env.ISS || "https://ssfrisklevelrepo.onrender.com").replace(/\/$/, "");
-const DEFAULT_AUD = process.env.AUD || "https://ssfrisklevelrepo.onrender.com";
+const ISS = (process.env.ISS || "https://ssfrisklevel.onrender.com").replace(/\/$/, "");
+const DEFAULT_AUD = process.env.AUD || "https://ssfrisklevel.onrender.com";
 
 /* Default iss for iss_sub SubjectFormat (e.g. https://caep.dev/event) */
 const DEFAULT_ISS_SUB_ISS = process.env.ISS_SUB_ISS || "https://caep.dev/event";
