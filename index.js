@@ -24,8 +24,8 @@ app.use(bodyParser.json({ limit: "1mb" }));
 
 /* --------------------------- CONFIG --------------------------- */
 const PORT = process.env.PORT || 3000;
-const ISS = (process.env.ISS || "https://ssf-transmitter.onrender.com").replace(/\/$/, "");
-const DEFAULT_AUD = process.env.AUD || "https://ssf-transmitter.onrender.com";
+const ISS = (process.env.ISS || "https://ssfrisklevelrepo.onrender.com").replace(/\/$/, "");
+const DEFAULT_AUD = process.env.AUD || "https://ssfrisklevelrepo.onrender.com";
 
 /* Default iss for iss_sub SubjectFormat (e.g. https://caep.dev/event) */
 const DEFAULT_ISS_SUB_ISS = process.env.ISS_SUB_ISS || "https://caep.dev/event";
@@ -104,6 +104,21 @@ async function verifyIncomingSET(token) {
 
 /* ------------------- BUILD SUB_ID (SubjectFormat) ------------------- */
 /**
+ * RFC 9493 iss_sub Subject Identifier uses JSON members "iss" and "sub" (not "issuer").
+ * We always emit those exact names in the signed SET. Callers may send "issuer" as an alias
+ * for "iss"; it is normalized to "iss" here. (jose SignJWT does not rename nested keys.)
+ */
+function canonicalIssSubSubId(sid) {
+  const iss = sid.iss != null && sid.iss !== "" ? sid.iss : sid.issuer;
+  if (!iss || sid.sub === undefined || sid.sub === null) {
+    throw new Error(
+      "sub_id with format 'iss_sub' requires both 'iss' (or alias 'issuer') and 'sub' fields"
+    );
+  }
+  return { format: "iss_sub", iss: String(iss), sub: String(sid.sub) };
+}
+
+/**
  * Builds sub_id for SET payload.
  * Default is email-based. Choose per-event via payload.subject_format:
  *   - "email" (default): { format: "email", email: "..." } — uses payload.email or payload.principal
@@ -115,10 +130,7 @@ function buildSubId(payload, stream, defaultEmail = "unknown@unknown.local") {
   if (payload && payload.sub_id && typeof payload.sub_id === "object") {
     const sid = payload.sub_id;
     if (sid.format === "iss_sub") {
-      if (!sid.iss || (sid.sub === undefined || sid.sub === null)) {
-        throw new Error("sub_id with format 'iss_sub' requires both 'iss' and 'sub' fields");
-      }
-      return { format: "iss_sub", iss: String(sid.iss), sub: String(sid.sub) };
+      return canonicalIssSubSubId(sid);
     }
     if (sid.format === "email") {
       const email = sid.email;
@@ -134,7 +146,12 @@ function buildSubId(payload, stream, defaultEmail = "unknown@unknown.local") {
   const format = payload?.subject_format || stream?.subject_format || "email";
 
   if (format === "iss_sub") {
-    const iss = payload?.iss_sub_iss || stream?.subject_format?.iss_sub?.iss || DEFAULT_ISS_SUB_ISS;
+    const cfg = stream?.subject_format?.iss_sub;
+    const iss =
+      payload?.iss_sub_iss ||
+      cfg?.iss ||
+      cfg?.issuer ||
+      DEFAULT_ISS_SUB_ISS;
     const sub = payload?.sub || payload?.native_identity;
     if (sub === undefined || sub === null) {
       throw new Error("subject_format 'iss_sub' requires 'sub' or 'native_identity' in payload");
@@ -146,6 +163,76 @@ function buildSubId(payload, stream, defaultEmail = "unknown@unknown.local") {
   const email = payload?.email || payload?.principal || defaultEmail;
   return { format: "email", email: String(email) };
 }
+
+/**
+ * Validates CAEP session-revoked "simple subject" (session + user + tenant).
+ * Returns an error code string or null if valid.
+ */
+function validateSessionRevokedSubject(subject) {
+  if (!subject || typeof subject !== "object") return "subject_required";
+  const sess = subject.session;
+  if (
+    !sess ||
+    sess.format !== "opaque" ||
+    sess.id === undefined ||
+    sess.id === null ||
+    String(sess.id) === ""
+  ) {
+    return "subject.session_opaque_id_required";
+  }
+  const user = subject.user;
+  if (!user || user.format !== "iss_sub") return "subject.user_iss_sub_required";
+  const iss = user.iss != null && user.iss !== "" ? user.iss : user.issuer;
+  if (!iss || user.sub === undefined || user.sub === null || String(user.sub) === "") {
+    return "subject.user_iss_sub_required";
+  }
+  const tenant = subject.tenant;
+  if (
+    !tenant ||
+    tenant.format !== "opaque" ||
+    tenant.id === undefined ||
+    tenant.id === null ||
+    String(tenant.id) === ""
+  ) {
+    return "subject.tenant_opaque_id_required";
+  }
+  return null;
+}
+
+/** Normalize subject for signed SET (iss_sub user uses canonical iss, not issuer alias). */
+function normalizeSessionRevokedSubject(subject) {
+  const user = canonicalIssSubSubId({
+    iss: subject.user.iss,
+    issuer: subject.user.issuer,
+    sub: subject.user.sub,
+  });
+  return {
+    session: { format: "opaque", id: String(subject.session.id) },
+    user,
+    tenant: { format: "opaque", id: String(subject.tenant.id) },
+  };
+}
+
+/** Top-level sub_id for session-revoked: explicit sub_id, else iss_sub from subject.user. */
+function buildSubIdForSessionRevoked(payload, stream, defaultEmail) {
+  if (payload.sub_id && typeof payload.sub_id === "object") {
+    return buildSubId(payload, stream, defaultEmail);
+  }
+  const user = payload.subject?.user;
+  if (user && user.format === "iss_sub") {
+    try {
+      return canonicalIssSubSubId({
+        iss: user.iss,
+        issuer: user.issuer,
+        sub: user.sub,
+      });
+    } catch (_) {
+      /* fall through */
+    }
+  }
+  return buildSubId(payload, stream, defaultEmail);
+}
+
 
 /* ------------------- STREAM STORE ------------------- */
 const streams = {};
@@ -169,7 +256,7 @@ app.get("/.well-known/ssf-configuration", (req, res) => {
 /* ------------------- AUTH MIDDLEWARE ------------------- */
 /*
   Expect Authorization: Bearer <token>
-  Token value is validated against process.env.SSF_AUTH_TOKEN || "token12345"
+  Token value is validated against process.env.SSF_AUTH_TOKEN || "token123"
 */
 app.use("/ssf", (req, res, next) => {
   const auth = req.headers.authorization || "";
@@ -177,7 +264,7 @@ app.use("/ssf", (req, res, next) => {
     return res.status(401).json({ error: "unauthorized", message: "missing_bearer_token" });
   }
   const token = auth.slice(7).trim();
-  const expected = process.env.SSF_AUTH_TOKEN || "token12345";
+  const expected = process.env.SSF_AUTH_TOKEN || "token123";
   if (!token || token !== expected) {
     return res.status(401).json({ error: "unauthorized", message: "invalid_token" });
   }
@@ -226,7 +313,7 @@ app.post("/ssf/streams", (req, res) => {
       delivery: {
         method,
         endpoint_url: endpoint,
-        authorization_header: delivery.authorization_header || "Bearer token12345",
+        authorization_header: delivery.authorization_header || "Bearer token123",
       },
       events_requested: body.events_requested,
       events_accepted: body.events_requested,
@@ -444,7 +531,7 @@ app.put("/ssf/streams", (req, res) => {
         delivery: {
           method,
           endpoint_url: endpoint,
-          authorization_header: delivery.authorization_header || "Bearer token12345"
+          authorization_header: delivery.authorization_header || "Bearer token123"
         },
         events_requested: incoming.events_requested || incoming.events_accepted || incoming.events_delivered || [],
         events_accepted: incoming.events_accepted || incoming.events_requested || incoming.events_delivered || [],
