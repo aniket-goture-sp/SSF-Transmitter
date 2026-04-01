@@ -961,6 +961,88 @@ app.post("/caep/send-token-claim-change", async (req, res) => {
   }
 });
 
+/* ============================================================
+   CAEP EVENT: SESSION REVOKED (simple subject: session + user + tenant)
+   ============================================================ */
+app.post("/caep/send-session-revoked", async (req, res) => {
+  try {
+    const { stream_id, receiver_url, payload } = req.body || {};
+
+    if (!payload || !payload.subject) {
+      return res.status(400).json({ error: "payload.subject_required" });
+    }
+
+    const subjectErr = validateSessionRevokedSubject(payload.subject);
+    if (subjectErr) {
+      return res.status(400).json({ error: subjectErr });
+    }
+
+    let target, authHeader;
+
+    if (stream_id) {
+      const s = streams[stream_id];
+      if (!s) return res.status(404).json({ error: "stream_not_found" });
+
+      target = s.delivery.endpoint_url;
+      authHeader = s.delivery.authorization_header;
+    } else if (receiver_url) {
+      target = receiver_url;
+      authHeader = req.body.authorization_header || null;
+    } else {
+      return res.status(400).json({ error: "stream_id_or_receiver_url_required" });
+    }
+
+    const eventType =
+      "https://schemas.openid.net/secevent/caep/event-type/session-revoked";
+
+    const eventBody = {
+      subject: normalizeSessionRevokedSubject(payload.subject),
+      ...(payload.event_timestamp ? { event_timestamp: payload.event_timestamp } : {}),
+      ...(payload.initiating_entity ? { initiating_entity: payload.initiating_entity } : {}),
+      ...(payload.reason_admin ? { reason_admin: payload.reason_admin } : {}),
+      ...(payload.reason_user ? { reason_user: payload.reason_user } : {}),
+    };
+
+    const streamObj = stream_id ? streams[stream_id] : null;
+    const sub_id = buildSubIdForSessionRevoked(
+      payload,
+      streamObj,
+      payload.principal || "unknown@unknown.local"
+    );
+
+    const setPayload = {
+      iss: ISS,
+      aud: payload.aud || DEFAULT_AUD,
+      ...(payload.txn ? { txn: payload.txn } : {}),
+      sub_id,
+      events: {
+        [eventType]: eventBody,
+      },
+    };
+
+    const signed = await signSET(setPayload);
+
+    const headers = { "Content-Type": "application/secevent+jwt" };
+    if (authHeader) headers["Authorization"] = authHeader;
+
+    const resp = await axios
+      .post(target, signed, { headers, validateStatus: () => true, timeout: 20000 })
+      .catch((e) => e.response || { status: 500, data: String(e) });
+
+    logEvent("session_revoked", target, resp);
+
+    res.status(200).json({
+      message: "session_revoked_sent",
+      http_status: resp.status,
+      receiver_response: resp.data || null,
+    });
+  } catch (err) {
+    console.error("session-revoked error:", err.message);
+    res.status(500).json({ error: "internal_error", message: err.message });
+  }
+});
+
+
 /* Root */
 app.get("/", (req, res) => {
   res.json({
