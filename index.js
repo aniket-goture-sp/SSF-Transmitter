@@ -233,6 +233,48 @@ function buildSubIdForSessionRevoked(payload, stream, defaultEmail) {
   return buildSubId(payload, stream, defaultEmail);
 }
 
+/**
+ * Validates CAEP credential-change subject (iss_sub in event body).
+ * Returns an error code string or null if valid.
+ */
+function validateCredentialChangeSubject(subject) {
+  if (!subject || typeof subject !== "object") return "subject_required";
+  if (subject.format !== "iss_sub") return "subject.iss_sub_required";
+  const iss = subject.iss != null && subject.iss !== "" ? subject.iss : subject.issuer;
+  if (!iss || subject.sub === undefined || subject.sub === null || String(subject.sub) === "") {
+    return "subject.iss_sub_required";
+  }
+  return null;
+}
+
+function normalizeCredentialChangeSubject(subject) {
+  return canonicalIssSubSubId({
+    iss: subject.iss,
+    issuer: subject.issuer,
+    sub: subject.sub,
+  });
+}
+
+/** Top-level sub_id: explicit sub_id, else iss_sub from payload.subject. */
+function buildSubIdForCredentialChange(payload, stream, defaultEmail) {
+  if (payload.sub_id && typeof payload.sub_id === "object") {
+    return buildSubId(payload, stream, defaultEmail);
+  }
+  const subj = payload.subject;
+  if (subj && subj.format === "iss_sub") {
+    try {
+      return canonicalIssSubSubId({
+        iss: subj.iss,
+        issuer: subj.issuer,
+        sub: subj.sub,
+      });
+    } catch (_) {
+      /* fall through */
+    }
+  }
+  return buildSubId(payload, stream, defaultEmail);
+}
+
 
 /* ------------------- STREAM STORE ------------------- */
 const streams = {};
@@ -1038,6 +1080,112 @@ app.post("/caep/send-session-revoked", async (req, res) => {
     });
   } catch (err) {
     console.error("session-revoked error:", err.message);
+    res.status(500).json({ error: "internal_error", message: err.message });
+  }
+});
+
+
+
+/* ============================================================
+   CAEP EVENT: CREDENTIAL CHANGE (subject: iss_sub)
+   ============================================================ */
+app.post("/caep/send-credential-change", async (req, res) => {
+  try {
+    const { stream_id, receiver_url, payload } = req.body || {};
+
+    if (!payload || !payload.subject) {
+      return res.status(400).json({ error: "payload.subject_required" });
+    }
+
+    const subjectErr = validateCredentialChangeSubject(payload.subject);
+    if (subjectErr) {
+      return res.status(400).json({ error: subjectErr });
+    }
+
+    if (
+      payload.credential_type === undefined ||
+      payload.credential_type === null ||
+      String(payload.credential_type).trim() === ""
+    ) {
+      return res.status(400).json({ error: "payload.credential_type_required" });
+    }
+    if (
+      payload.change_type === undefined ||
+      payload.change_type === null ||
+      String(payload.change_type).trim() === ""
+    ) {
+      return res.status(400).json({ error: "payload.change_type_required" });
+    }
+
+    let target, authHeader;
+
+    if (stream_id) {
+      const s = streams[stream_id];
+      if (!s) return res.status(404).json({ error: "stream_not_found" });
+
+      target = s.delivery.endpoint_url;
+      authHeader = s.delivery.authorization_header;
+    } else if (receiver_url) {
+      target = receiver_url;
+      authHeader = req.body.authorization_header || null;
+    } else {
+      return res.status(400).json({ error: "stream_id_or_receiver_url_required" });
+    }
+
+    const eventType =
+      "https://schemas.openid.net/secevent/caep/event-type/credential-change";
+
+    const eventBody = {
+      subject: normalizeCredentialChangeSubject(payload.subject),
+      credential_type: String(payload.credential_type),
+      change_type: String(payload.change_type),
+      ...(payload.fido2_aaguid !== undefined && payload.fido2_aaguid !== null
+        ? { fido2_aaguid: String(payload.fido2_aaguid) }
+        : {}),
+      ...(payload.friendly_name !== undefined && payload.friendly_name !== null
+        ? { friendly_name: String(payload.friendly_name) }
+        : {}),
+      ...(payload.event_timestamp ? { event_timestamp: payload.event_timestamp } : {}),
+      ...(payload.initiating_entity ? { initiating_entity: payload.initiating_entity } : {}),
+      ...(payload.reason_admin ? { reason_admin: payload.reason_admin } : {}),
+      ...(payload.reason_user ? { reason_user: payload.reason_user } : {}),
+    };
+
+    const streamObj = stream_id ? streams[stream_id] : null;
+    const sub_id = buildSubIdForCredentialChange(
+      payload,
+      streamObj,
+      payload.principal || "unknown@unknown.local"
+    );
+
+    const setPayload = {
+      iss: ISS,
+      aud: payload.aud || DEFAULT_AUD,
+      ...(payload.txn ? { txn: payload.txn } : {}),
+      sub_id,
+      events: {
+        [eventType]: eventBody,
+      },
+    };
+
+    const signed = await signSET(setPayload);
+
+    const headers = { "Content-Type": "application/secevent+jwt" };
+    if (authHeader) headers["Authorization"] = authHeader;
+
+    const resp = await axios
+      .post(target, signed, { headers, validateStatus: () => true, timeout: 20000 })
+      .catch((e) => e.response || { status: 500, data: String(e) });
+
+    logEvent("credential_change", target, resp);
+
+    res.status(200).json({
+      message: "credential_change_sent",
+      http_status: resp.status,
+      receiver_response: resp.data || null,
+    });
+  } catch (err) {
+    console.error("credential-change error:", err.message);
     res.status(500).json({ error: "internal_error", message: err.message });
   }
 });
